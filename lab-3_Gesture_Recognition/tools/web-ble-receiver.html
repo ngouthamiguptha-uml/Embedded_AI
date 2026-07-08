@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lab 3 — Gesture BLE receiver</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    max-width: 640px; margin: 2em auto; padding: 0 1em;
+  }
+  h1 { font-size: 1.4em; margin: 0 0 .4em; }
+  .sub { color: #777; margin: 0 0 1.5em; }
+  button {
+    font-size: 1em; padding: .55em 1.1em; border-radius: 6px;
+    border: 1px solid #888; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .status {
+    margin: 1em 0; padding: .7em 1em; border-radius: 6px;
+    background: #f4f4f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    .status { background: #222; }
+  }
+  .dot {
+    display: inline-block; width: .7em; height: .7em; border-radius: 50%;
+    background: #c33; margin-right: .5em; vertical-align: middle;
+  }
+  .dot.ok { background: #2c2; }
+  table {
+    width: 100%; border-collapse: collapse; margin-top: 1em;
+    font-variant-numeric: tabular-nums;
+  }
+  th, td {
+    border-bottom: 1px solid #ccc; padding: .4em .6em; text-align: left;
+  }
+  th { font-size: .85em; color: #777; font-weight: normal; }
+  .label-cell { font-weight: 600; }
+  .byte-cell { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .empty { color: #888; font-style: italic; padding: 1em 0; }
+  small { color: #777; }
+  code { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+</style>
+</head>
+<body>
+
+<h1>Lab 3 — Gesture BLE receiver</h1>
+<p class="sub">EECE.4862 / 5862 Embedded AI · Summer 2026 · 5862 Part C.1</p>
+
+<p>This page connects to your Nano running <code>g3-ble-telemetry.ino</code>
+and prints one row per gesture detection. No app install needed; the
+browser does all the work via the Web Bluetooth API. Tested in
+Chrome / Edge on desktop and Android.</p>
+
+<p>
+  <button id="connect">Connect to Nano33Gesture</button>
+  <button id="disconnect" disabled>Disconnect</button>
+  <button id="clear">Clear log</button>
+</p>
+
+<div class="status">
+  <span id="dot" class="dot"></span>
+  <span id="status">Not connected.</span>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Time</th><th>Byte</th><th>Label</th>
+    </tr>
+  </thead>
+  <tbody id="log">
+    <tr><td colspan="3" class="empty">No events yet — perform a gesture.</td></tr>
+  </tbody>
+</table>
+
+<p><small>
+  Service UUID:
+  <code>19b10000-e8f2-537e-4f6c-d104768a1214</code><br>
+  Characteristic UUID:
+  <code>19b10001-e8f2-537e-4f6c-d104768a1214</code><br>
+  These match the UUIDs in <code>g3-ble-telemetry.ino</code>. If you changed
+  them in the sketch, edit the matching constants near the top of this
+  file's <code>&lt;script&gt;</code> block.
+</small></p>
+
+<script>
+'use strict';
+
+// ===========================================================================
+// Edit these to match g3-ble-telemetry.ino if you change the UUIDs there.
+// ===========================================================================
+const SERVICE_UUID = '19b10000-e8f2-537e-4f6c-d104768a1214';
+const CHAR_UUID    = '19b10001-e8f2-537e-4f6c-d104768a1214';
+const DEVICE_NAME  = 'Nano33Gesture';
+
+// Byte -> label mapping (mirror your sketch's classification convention).
+// Edge Impulse sorts class labels alphabetically, so the byte the sketch
+// notifies is the gesture's alphabetical index: circle=0, flex=1, idle=2,
+// punch=3. If your EI project produced a different order, edit this map.
+const LABELS = {
+  0x00: 'circle',
+  0x01: 'flex',
+  0x02: 'idle',
+  0x03: 'punch',
+};
+// ===========================================================================
+
+const $ = (id) => document.getElementById(id);
+const connectBtn    = $('connect');
+const disconnectBtn = $('disconnect');
+const clearBtn      = $('clear');
+const dot           = $('dot');
+const status        = $('status');
+const log           = $('log');
+let firstEvent      = true;
+
+let device = null;
+let characteristic = null;
+
+function setStatus(text, connected) {
+  status.textContent = text;
+  dot.classList.toggle('ok', !!connected);
+  connectBtn.disabled    = !!connected;
+  disconnectBtn.disabled = !connected;
+}
+
+function timestamp() {
+  const d = new Date();
+  const pad = (n, w=2) => String(n).padStart(w, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
+}
+
+function logEvent(byteValue) {
+  if (firstEvent) {
+    log.innerHTML = '';
+    firstEvent = false;
+  }
+  const row = document.createElement('tr');
+  const label = LABELS[byteValue] ?? `(unknown 0x${byteValue.toString(16).padStart(2, '0')})`;
+  row.innerHTML = `
+    <td>${timestamp()}</td>
+    <td class="byte-cell">0x${byteValue.toString(16).padStart(2, '0')}</td>
+    <td class="label-cell">${label}</td>
+  `;
+  log.prepend(row);
+}
+
+connectBtn.addEventListener('click', async () => {
+  if (!('bluetooth' in navigator)) {
+    setStatus('Web Bluetooth not supported in this browser. Use Chrome or Edge on desktop or Android.', false);
+    return;
+  }
+  try {
+    setStatus('Requesting device…', false);
+    device = await navigator.bluetooth.requestDevice({
+      //filters: [{ name: DEVICE_NAME }],
+      //optionalServices: [SERVICE_UUID],
+      acceptAllDevices: true,
+      optionalServices: [SERVICE_UUID],
+    });
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+
+    setStatus(`Connecting to ${device.name}…`, false);
+    const server  = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE_UUID);
+    characteristic = await service.getCharacteristic(CHAR_UUID);
+
+    characteristic.addEventListener('characteristicvaluechanged', (e) => {
+      const v = e.target.value;            // DataView
+      if (v.byteLength === 0) return;
+      logEvent(v.getUint8(0));
+    });
+    await characteristic.startNotifications();
+
+    setStatus(`Connected to ${device.name}. Subscribed.`, true);
+  } catch (err) {
+    setStatus(`Error: ${err.message || err}`, false);
+  }
+});
+
+disconnectBtn.addEventListener('click', () => {
+  if (device && device.gatt && device.gatt.connected) device.gatt.disconnect();
+});
+
+clearBtn.addEventListener('click', () => {
+  log.innerHTML = '<tr><td colspan="3" class="empty">Log cleared.</td></tr>';
+  firstEvent = true;
+});
+
+function onDisconnected() {
+  setStatus('Disconnected.', false);
+  characteristic = null;
+}
+
+// Initial state
+setStatus('Not connected.', false);
+</script>
+</body>
+</html>
